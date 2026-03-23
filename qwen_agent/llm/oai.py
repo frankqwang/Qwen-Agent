@@ -166,14 +166,35 @@ class TextChatAtOAI(BaseFnCallModel):
         messages = self.convert_messages_to_dicts(messages)
         try:
             response = self._chat_complete_create(model=self.model, messages=messages, stream=False, **generate_cfg)
-            if hasattr(response.choices[0].message, 'reasoning_content'):
-                return [
+            msg = response.choices[0].message
+            res: List[Message] = []
+
+            reasoning_content = getattr(msg, 'reasoning_content', None)
+            if reasoning_content:
+                res.append(
                     Message(role=ASSISTANT,
-                            content=response.choices[0].message.content,
-                            reasoning_content=response.choices[0].message.reasoning_content)
-                ]
-            else:
-                return [Message(role=ASSISTANT, content=response.choices[0].message.content)]
+                            content='',
+                            reasoning_content=reasoning_content,
+                            extra={'model_service_info': response}))
+
+            content = msg.content or ''
+            if content:
+                res.append(Message(role=ASSISTANT, content=content, extra={'model_service_info': response}))
+
+            tool_calls = getattr(msg, 'tool_calls', None) or []
+            for tc in tool_calls:
+                res.append(
+                    Message(role=ASSISTANT,
+                            content='',
+                            function_call=FunctionCall(name=tc.function.name or '', arguments=tc.function.arguments or ''),
+                            extra={
+                                'model_service_info': response,
+                                'function_id': tc.id or '1'
+                            }))
+
+            if res:
+                return res
+            return [Message(role=ASSISTANT, content='', extra={'model_service_info': response})]
         except OpenAIError as ex:
             raise ModelServiceError(exception=ex)
 

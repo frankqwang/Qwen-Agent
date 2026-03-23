@@ -13,19 +13,39 @@
 # limitations under the License.
 
 import copy
+import importlib
 from typing import Union
 
-from .azure import TextChatAtAzure
 from .base import LLM_REGISTRY, BaseChatModel, ModelServiceError
-from .oai import TextChatAtOAI
-from .openvino import OpenVINO
-from .qwen_dashscope import QwenChatAtDS
-from .qwenaudio_dashscope import QwenAudioChatAtDS
-from .qwenomni_oai import QwenOmniChatAtOAI
-from .qwenvl_dashscope import QwenVLChatAtDS
-from .qwenvl_oai import QwenVLChatAtOAI
-from .qwenvlo_dashscope import QwenVLoChatAtDS
-from .transformers_llm import Transformers
+
+__all__ = [
+    'BaseChatModel',
+    'get_chat_model',
+    'ModelServiceError',
+]
+
+
+def _safe_import(module_name: str, exported_names: list[str]) -> None:
+    try:
+        module = importlib.import_module(f'.{module_name}', __name__)
+    except ImportError:
+        return
+
+    for name in exported_names:
+        globals()[name] = getattr(module, name)
+        __all__.append(name)
+
+
+_safe_import('azure', ['TextChatAtAzure'])
+_safe_import('oai', ['TextChatAtOAI'])
+_safe_import('openvino', ['OpenVINO'])
+_safe_import('qwen_dashscope', ['QwenChatAtDS'])
+_safe_import('qwenaudio_dashscope', ['QwenAudioChatAtDS'])
+_safe_import('qwenomni_oai', ['QwenOmniChatAtOAI'])
+_safe_import('qwenvl_dashscope', ['QwenVLChatAtDS'])
+_safe_import('qwenvl_oai', ['QwenVLChatAtOAI'])
+_safe_import('qwenvlo_dashscope', ['QwenVLoChatAtDS'])
+_safe_import('transformers_llm', ['Transformers'])
 
 
 def get_chat_model(cfg: Union[dict, str] = 'qwen-plus') -> BaseChatModel:
@@ -99,19 +119,3 @@ def get_chat_model(cfg: Union[dict, str] = 'qwen-plus') -> BaseChatModel:
 
     raise ValueError(f'Invalid model cfg: {cfg}')
 
-
-__all__ = [
-    'BaseChatModel',
-    'QwenChatAtDS',
-    'TextChatAtOAI',
-    'TextChatAtAzure',
-    'QwenVLChatAtDS',
-    'QwenVLChatAtOAI',
-    'QwenAudioChatAtDS',
-    'QwenVLoChatAtDS',
-    'QwenOmniChatAtOAI',
-    'OpenVINO',
-    'Transformers',
-    'get_chat_model',
-    'ModelServiceError',
-]
