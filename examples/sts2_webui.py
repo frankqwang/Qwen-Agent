@@ -31,14 +31,27 @@ from qwen_agent.utils.utils import print_traceback
 DEFAULT_SYSTEM_MESSAGE = """你正在通过 MCP 工具游玩《杀戮尖塔2》。请始终以工具返回的游戏状态为准。
 行动前先读取当前状态，不要编造卡牌、敌人、地图、奖励或事件内容。
 如果工具调用失败，请用中文简短说明原因，并尝试更安全的下一步。
-每一轮最多执行一个真实游戏动作；只读状态不算真实动作。
+每一轮最多执行五个真实游戏动作；只读状态不算真实动作。
 默认用中文回答，说明尽量简洁直接。"""
 
-AUTO_STEP_PROMPT = "继续自动游玩这一局。先读取当前状态，选择当前最好的单步动作并执行，然后用中文简短说明你做了什么。"
+AUTO_STEP_PROMPT = "继续自动游玩这一局。先读取当前状态，选择当前最好的动作并执行，可以执行多步，然后用中文简短说明你做了什么。"
 
 APP_BOT_CSS = (REPO_ROOT / "qwen_agent" / "gui" / "assets" / "appBot.css").read_text(encoding="utf-8")
 
 STS2_WEBUI_CSS = APP_BOT_CSS + """
+.gradio-container{max-width:100%!important;width:100%!important;padding-left:2px!important;padding-right:2px!important}
+.gradio-container .main{max-width:100%!important}
+.app,.wrap,.contain{max-width:100%!important;width:100%!important;margin-left:0!important;margin-right:0!important;padding-left:0!important;padding-right:0!important}
+.container{gap:16px}
+.container{width:100%!important;max-width:100%!important;margin:0!important;padding-left:0!important;padding-right:0!important}
+.sts2-main-col,.sts2-side-col{min-width:0!important;flex:1 1 0!important}
+.sts2-main-col{width:50%!important}
+.sts2-side-col{width:50%!important}
+.sts2-chatbot,.sts2-chatbot>div{width:100%!important;min-width:0!important}
+.sts2-chatbot .message-wrap,.sts2-chatbot .message-row,.sts2-chatbot .bubble-wrap{max-width:100%!important;width:100%!important}
+.sts2-chatbot .message{max-width:100%!important;width:100%!important}
+.sts2-chatbot .avatar-container,.sts2-chatbot .avatar-image-container{min-width:52px!important;width:52px!important}
+.sts2-chatbot .message-row.bot,.sts2-chatbot .message-row.user{align-items:flex-start}
 .sts2-sidebar{gap:12px}
 .sts2-agent-card{display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid #243041;border-radius:12px;background:#101828;color:#f8fafc}
 .sts2-agent-card__avatar img{width:44px;height:44px;border-radius:999px;object-fit:cover;display:block}
@@ -64,6 +77,14 @@ STS2_WEBUI_CSS = APP_BOT_CSS + """
 .sts2-step-card__title{font-size:12px;font-weight:700;color:#f8fafc}
 .sts2-step-card__line{margin-top:4px;font-size:12px;line-height:1.45;color:#d0d5dd}
 .sts2-steps-scroll{max-height:325px;overflow-y:auto;padding-right:4px}
+.markdown-body details{white-space:normal!important;overflow-wrap:anywhere;word-break:break-word}
+.markdown-body summary{white-space:normal!important}
+.markdown-body .message{overflow-wrap:anywhere;word-break:break-word}
+.sts2-side-col .sts2-panel,.sts2-side-col .sts2-agent-card{width:100%!important;box-sizing:border-box}
+@media (max-width: 1100px){
+  .container{gap:12px}
+  .sts2-main-col,.sts2-side-col{width:50%!important;flex:1 1 0!important}
+}
 """
 
 
@@ -590,14 +611,15 @@ class STS2WebUI(WebUI):
             agent_selector = gr.State(0)
             with ms.Application():
                 with gr.Row(elem_classes="container"):
-                    with gr.Column(scale=16):
+                    with gr.Column(scale=1, elem_classes="sts2-main-col"):
                         chatbot = mgr.Chatbot(
                             value=convert_history_to_chatbot(messages=messages),
                             avatar_images=[self.user_config, self.agent_config_list],
                             height=850,
-                            avatar_image_width=80,
+                            avatar_image_width=56,
                             flushing=False,
                             show_copy_button=True,
+                            elem_classes=["sts2-chatbot"],
                             latex_delimiters=[
                                 {"left": "\\(", "right": "\\)", "display": True},
                                 {"left": "\\begin{equation}", "right": "\\end{equation}", "display": True},
@@ -611,7 +633,7 @@ class STS2WebUI(WebUI):
                         input_box = mgr.MultimodalInput(placeholder=self.input_placeholder)
                         audio_input = gr.Audio(sources=["microphone"], type="filepath")
 
-                    with gr.Column(scale=10, elem_classes="sts2-sidebar"):
+                    with gr.Column(scale=1, elem_classes=["sts2-sidebar", "sts2-side-col"]):
                         agent_info_block = gr.HTML(self.render_agent_info_html())
                         state_panel = gr.HTML(self.render_state_panel())
                         recent_steps = gr.HTML(self.render_recent_steps_html())
