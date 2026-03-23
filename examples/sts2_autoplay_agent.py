@@ -173,6 +173,8 @@ def state_signature(state: dict) -> str:
     player = {}
     if isinstance(state.get("player"), dict):
         player = state.get("player", {})
+    elif isinstance(state.get("battle"), dict) and isinstance(state["battle"].get("player"), dict):
+        player = state["battle"]["player"]
     elif isinstance(state.get(state_type), dict) and isinstance(state[state_type].get("player"), dict):
         player = state[state_type]["player"]
     elif isinstance(state.get("map"), dict) and isinstance(state["map"].get("player"), dict):
@@ -207,6 +209,8 @@ def summarize_state(state: dict) -> str:
     player = {}
     if isinstance(state.get("player"), dict):
         player = state.get("player", {})
+    elif isinstance(state.get("battle"), dict) and isinstance(state["battle"].get("player"), dict):
+        player = state["battle"]["player"]
     elif isinstance(state.get(state_type), dict) and isinstance(state[state_type].get("player"), dict):
         player = state[state_type]["player"]
     elif isinstance(state.get("map"), dict) and isinstance(state["map"].get("player"), dict):
@@ -240,8 +244,15 @@ why: ...
 
 def extract_last_assistant_text(responses: list[Message]) -> str:
     for msg in reversed(responses):
-        if msg.role == ASSISTANT and isinstance(msg.content, str) and msg.content.strip():
-            return msg.content.strip()
+        if isinstance(msg, dict):
+            role = msg.get("role")
+            content = msg.get("content")
+        else:
+            role = msg.role
+            content = msg.content
+
+        if role == ASSISTANT and isinstance(content, str) and content.strip():
+            return content.strip()
     return ""
 
 
