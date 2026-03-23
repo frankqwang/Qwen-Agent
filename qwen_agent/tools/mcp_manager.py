@@ -271,7 +271,31 @@ class MCPManager:
             client_id = register_client_id
 
             def call(self, params: Union[str, dict], **kwargs) -> str:
-                tool_args = json.loads(params)
+                tool_args: dict
+                if isinstance(params, dict):
+                    tool_args = params
+                else:
+                    raw_params = (params or '').strip()
+                    if not raw_params:
+                        tool_args = {}
+                    else:
+                        loaded = None
+                        try:
+                            loaded = json.loads(raw_params)
+                        except json.JSONDecodeError:
+                            # Some local models append stray text for no-arg MCP tools.
+                            # For tools without required arguments, treat malformed payloads as empty args.
+                            if not self.parameters.get('required'):
+                                tool_args = {}
+                            else:
+                                start = raw_params.find('{')
+                                end = raw_params.rfind('}')
+                                if start != -1 and end != -1 and end > start:
+                                    loaded = json.loads(raw_params[start:end + 1])
+                                else:
+                                    raise
+                        if loaded is not None:
+                            tool_args = loaded if isinstance(loaded, dict) else {}
                 # Submit coroutine to the event loop and wait for the result
                 manager = MCPManager()
                 client = manager.clients[self.client_id]
