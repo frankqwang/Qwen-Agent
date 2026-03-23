@@ -17,6 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import qwen_agent.agents.fncall_agent as fncall_agent_module
 from qwen_agent.agents import Assistant
 from qwen_agent.agents.user_agent import PENDING_USER_INPUT
 from qwen_agent.gui import WebUI
@@ -25,47 +26,40 @@ from qwen_agent.gui.gradio_utils import covert_image_to_base64
 from qwen_agent.gui.utils import convert_fncall_to_text, convert_history_to_chatbot, get_avatar_image
 from qwen_agent.llm.schema import AUDIO, CONTENT, FILE, IMAGE, NAME, ROLE, USER, VIDEO
 from qwen_agent.log import logger
-from qwen_agent.utils.utils import print_traceback
 
 
-DEFAULT_SYSTEM_MESSAGE = """你正在通过 MCP 工具游玩《杀戮尖塔2》。请始终以工具返回的游戏状态为准。
-行动前先读取当前状态，不要编造卡牌、敌人、地图、奖励或事件内容。
+DEFAULT_SYSTEM_MESSAGE = """你正在通过 MCP 工具游玩《杀戮尖塔2》。
+请始终以工具返回的游戏状态为准，不要编造卡牌、敌人、地图、奖励或事件内容。
+你可以在一轮里连续执行多个真实动作，但要谨慎，优先完成当前战斗回合、奖励领取或单个界面的合理推进。
 如果工具调用失败，请用中文简短说明原因，并尝试更安全的下一步。
-每一轮最多执行五个真实游戏动作；只读状态不算真实动作。
 默认用中文回答，说明尽量简洁直接。"""
-
-AUTO_STEP_PROMPT = "继续自动游玩这一局。先读取当前状态，选择当前最好的动作并执行，可以执行多步，然后用中文简短说明你做了什么。"
 
 APP_BOT_CSS = (REPO_ROOT / "qwen_agent" / "gui" / "assets" / "appBot.css").read_text(encoding="utf-8")
 
 STS2_WEBUI_CSS = APP_BOT_CSS + """
-.gradio-container{max-width:100%!important;width:100%!important;padding-left:2px!important;padding-right:2px!important}
-.gradio-container .main{max-width:100%!important}
-.app,.wrap,.contain{max-width:100%!important;width:100%!important;margin-left:0!important;margin-right:0!important;padding-left:0!important;padding-right:0!important}
-.container{gap:16px}
-.container{width:100%!important;max-width:100%!important;margin:0!important;padding-left:0!important;padding-right:0!important}
-.sts2-main-col,.sts2-side-col{min-width:0!important;flex:1 1 0!important}
-.sts2-main-col{width:50%!important}
-.sts2-side-col{width:50%!important}
+html,body{margin:0!important;padding:0!important;background:#111318!important}
+body .gradio-container{max-width:none!important;width:calc(100vw - 2px)!important;margin:0!important;padding:1px!important}
+body .gradio-container .main{max-width:none!important;width:100%!important;margin:0!important;padding:0!important}
+.app,.wrap,.contain{max-width:none!important;width:100%!important;margin:0!important;padding:0!important}
+.container{display:grid!important;grid-template-columns:minmax(0,1fr) minmax(0,1fr)!important;gap:10px!important;width:100%!important;max-width:none!important;margin:0!important;padding:0!important}
+.sts2-main-col,.sts2-side-col{min-width:0!important;width:100%!important;max-width:none!important}
 .sts2-chatbot,.sts2-chatbot>div{width:100%!important;min-width:0!important}
 .sts2-chatbot .message-wrap,.sts2-chatbot .message-row,.sts2-chatbot .bubble-wrap{max-width:100%!important;width:100%!important}
 .sts2-chatbot .message{max-width:100%!important;width:100%!important}
-.sts2-chatbot .avatar-container,.sts2-chatbot .avatar-image-container{min-width:52px!important;width:52px!important}
-.sts2-chatbot .message-row.bot,.sts2-chatbot .message-row.user{align-items:flex-start}
-.sts2-sidebar{gap:12px}
-.sts2-agent-card{display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid #243041;border-radius:12px;background:#101828;color:#f8fafc}
-.sts2-agent-card__avatar img{width:44px;height:44px;border-radius:999px;object-fit:cover;display:block}
+.sts2-chatbot .avatar-container,.sts2-chatbot .avatar-image-container{min-width:48px!important;width:48px!important}
+.sts2-sidebar{gap:10px}
+.sts2-agent-card{display:flex;align-items:center;gap:10px;padding:12px;border:1px solid #243041;border-radius:12px;background:#101828;color:#f8fafc}
+.sts2-agent-card__avatar img{width:40px;height:40px;border-radius:999px;object-fit:cover;display:block}
 .sts2-agent-card__title{font-size:16px;font-weight:700;line-height:1.2;color:#f8fafc}
 .sts2-agent-card__desc{margin-top:4px;font-size:12px;line-height:1.45;color:#98a2b3}
-.sts2-panel{padding:14px;border:1px solid #243041;border-radius:12px;background:#101828;color:#e5e7eb}
+.sts2-panel{padding:14px;border:1px solid #243041;border-radius:12px;background:#101828;color:#e5e7eb;box-sizing:border-box;width:100%!important}
 .sts2-panel__title{margin-bottom:10px;font-size:14px;font-weight:700;color:#f8fafc}
-.sts2-panel__summary{font-size:13px;line-height:1.55;color:#d0d5dd;margin-bottom:12px}
-.sts2-panel__grid{display:grid;grid-template-columns:auto 1fr;gap:6px 10px;font-size:13px}
-.sts2-panel__label{color:#98a2b3}
-.sts2-panel__value{color:#f8fafc}
-.sts2-panel__detail{margin-top:8px;font-size:13px;line-height:1.45;color:#d0d5dd}
-.sts2-panel__footnote{margin-top:12px;font-size:12px;color:#98a2b3}
-.sts2-state-panel{min-height:320px}
+.sts2-panel__summary{font-size:13px;line-height:1.5;color:#d0d5dd}
+.sts2-state-panel{min-height:0}
+.sts2-state-lines{display:flex;flex-wrap:wrap;gap:6px 12px;margin-top:10px}
+.sts2-state-chip{font-size:12px;line-height:1.35;color:#d0d5dd;background:#0b1220;border:1px solid #243041;border-radius:999px;padding:4px 10px}
+.sts2-state-detail{margin-top:10px;font-size:12px;line-height:1.45;color:#d0d5dd}
+.sts2-panel__footnote{margin-top:10px;font-size:12px;color:#98a2b3}
 .sts2-control-row{gap:8px}
 .sts2-control-row>*{min-width:0!important}
 .sts2-small-btn button{min-height:34px!important;height:34px!important;padding:0 12px!important;font-size:13px!important;border-radius:9px!important}
@@ -80,20 +74,13 @@ STS2_WEBUI_CSS = APP_BOT_CSS + """
 .markdown-body details{white-space:normal!important;overflow-wrap:anywhere;word-break:break-word}
 .markdown-body summary{white-space:normal!important}
 .markdown-body .message{overflow-wrap:anywhere;word-break:break-word}
-.sts2-side-col .sts2-panel,.sts2-side-col .sts2-agent-card{width:100%!important;box-sizing:border-box}
-@media (max-width: 1100px){
-  .container{gap:12px}
-  .sts2-main-col,.sts2-side-col{width:50%!important;flex:1 1 0!important}
-}
+@media (max-width: 1100px){.container{grid-template-columns:minmax(0,1fr) minmax(0,1fr)!important;gap:8px!important}}
 """
 
 
 def fetch_state(game_host: str, game_port: int) -> dict[str, Any]:
     query = urllib.parse.urlencode({"format": "json"})
-    req = urllib.request.Request(
-        f"http://{game_host}:{game_port}/api/v1/singleplayer?{query}",
-        method="GET",
-    )
+    req = urllib.request.Request(f"http://{game_host}:{game_port}/api/v1/singleplayer?{query}", method="GET")
     with urllib.request.urlopen(req, timeout=10) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -130,23 +117,31 @@ def summarize_state(state: dict[str, Any]) -> str:
     max_hp = player.get("max_hp", "-")
     gold = player.get("gold", "-")
     floor_num = state.get("floor") or state.get("floor_num") or state.get("act_floor") or "-"
-    extra = ""
+    return f"状态 {state_type}，运行 {run_status}，楼层 {floor_num}，生命 {hp}/{max_hp}，金币 {gold}"
+
+
+def build_state_summary_for_prompt(state: dict[str, Any]) -> str:
+    player = get_player(state)
+    state_type = state.get("state_type", "unknown")
+    lines = [
+        f"当前状态类型：{state_type}",
+        f"玩家：生命 {player.get('hp', '-')}/{player.get('max_hp', '-')}, 金币 {player.get('gold', '-')}",
+    ]
+    floor_num = state.get("floor") or state.get("floor_num") or state.get("act_floor")
+    if floor_num not in (None, ""):
+        lines.append(f"楼层：{floor_num}")
     if state_type in {"monster", "elite", "boss"}:
         battle = state.get("battle", {}) if isinstance(state.get("battle"), dict) else {}
-        energy = battle.get("player", {}).get("energy") if isinstance(battle.get("player"), dict) else "-"
+        battle_player = battle.get("player", {}) if isinstance(battle.get("player"), dict) else {}
+        lines.append(f"能量：{battle_player.get('energy', '-')}")
         enemies = battle.get("enemies", []) if isinstance(battle.get("enemies"), list) else []
-        hand = battle.get("hand", []) if isinstance(battle.get("hand"), list) else []
-        extra = f"，能量 {energy}，敌人 {len(enemies)}，手牌 {len(hand)}"
-    elif state_type == "map":
-        options = state.get("map", {}).get("next_options", []) if isinstance(state.get("map"), dict) else []
-        extra = f"，可选路线 {len(options)}"
-    elif state_type == "event":
-        event_state = state.get("event", {}) if isinstance(state.get("event"), dict) else {}
-        extra = f"，事件 {event_state.get('event_name') or '-'}，对话中 {event_state.get('in_dialogue')}"
-    elif state_type == "card_select":
-        section = state.get("card_select", {}) if isinstance(state.get("card_select"), dict) else {}
-        extra = f"，选牌 {section.get('screen_type') or '-'}，卡牌 {len(section.get('cards', []))}"
-    return f"状态 {state_type}，运行 {run_status}，楼层 {floor_num}，生命 {hp}/{max_hp}，金币 {gold}{extra}"
+        enemy_text = []
+        for enemy in enemies[:6]:
+            if isinstance(enemy, dict):
+                enemy_text.append(f"{enemy.get('entity_id') or enemy.get('name')}: {enemy.get('hp', '?')}/{enemy.get('max_hp', '?')}")
+        if enemy_text:
+            lines.append("敌人：" + "；".join(enemy_text))
+    return "\n".join(lines)
 
 
 def render_state_panel_html(game_host: str, game_port: int) -> str:
@@ -164,52 +159,49 @@ def render_state_panel_html(game_host: str, game_port: int) -> str:
     state_type = state.get("state_type", "unknown")
     player = get_player(state)
     floor_num = state.get("floor") or state.get("floor_num") or state.get("act_floor") or "-"
-    hp = player.get("hp", "-")
-    max_hp = player.get("max_hp", "-")
-    gold = player.get("gold", "-")
-    details: list[str] = []
+    chips = [
+        f"状态 {state_type}",
+        f"楼层 {floor_num}",
+        f"生命 {player.get('hp', '-')}/{player.get('max_hp', '-')}",
+        f"金币 {player.get('gold', '-')}",
+    ]
 
+    detail_lines: list[str] = []
     if state_type in {"monster", "elite", "boss"}:
         battle = state.get("battle", {}) if isinstance(state.get("battle"), dict) else {}
         energy = battle.get("player", {}).get("energy") if isinstance(battle.get("player"), dict) else "-"
         enemies = battle.get("enemies", []) if isinstance(battle.get("enemies"), list) else []
-        details.append(f"能量：{energy}")
-        details.append(f"敌人：{len(enemies)}")
+        chips.extend([f"能量 {energy}", f"敌人 {len(enemies)}"])
         if enemies:
-            preview = ", ".join(
+            preview = "，".join(
                 f"{enemy.get('name') or enemy.get('entity_id')} {enemy.get('hp')}/{enemy.get('max_hp')}"
-                for enemy in enemies[:2]
-                if isinstance(enemy, dict)
+                for enemy in enemies[:2] if isinstance(enemy, dict)
             )
             if preview:
-                details.append(f"目标：{preview}")
+                detail_lines.append(f"目标：{preview}")
     elif state_type == "map":
         options = state.get("map", {}).get("next_options", []) if isinstance(state.get("map"), dict) else []
-        option_types = [item.get("type") for item in options if isinstance(item, dict) and item.get("type")]
-        if option_types:
-            details.append("下一步可选：" + ", ".join(option_types[:5]))
+        types = [item.get("type") for item in options[:5] if isinstance(item, dict) and item.get("type")]
+        if types:
+            detail_lines.append("可选路线：" + "，".join(types))
     elif state_type == "event":
         event_state = state.get("event", {}) if isinstance(state.get("event"), dict) else {}
-        details.append(f"事件：{event_state.get('event_name') or '-'}")
-        details.append(f"对话中：{event_state.get('in_dialogue')}")
+        detail_lines.append(f"事件：{event_state.get('event_name') or '-'}")
     elif state_type == "card_select":
         section = state.get("card_select", {}) if isinstance(state.get("card_select"), dict) else {}
-        details.append(f"界面：{section.get('screen_type') or '-'}")
-        details.append(f"卡牌数：{len(section.get('cards', []))}")
+        chips.append(f"卡牌 {len(section.get('cards', []))}")
+        detail_lines.append(f"界面：{section.get('screen_type') or '-'}")
 
+    chips_html = "".join(f"<div class='sts2-state-chip'>{html.escape(item)}</div>" for item in chips)
+    details_html = "".join(f"<div class='sts2-state-detail'>{html.escape(item)}</div>" for item in detail_lines[:2])
     return (
         "<div class='sts2-panel sts2-state-panel'>"
         "<div class='sts2-panel__title'>当前游戏状态</div>"
         f"<div class='sts2-panel__summary'>{html.escape(summarize_state(state))}</div>"
-        "<div class='sts2-panel__grid'>"
-        f"<div class='sts2-panel__label'>状态</div><div class='sts2-panel__value'>{html.escape(str(state_type))}</div>"
-        f"<div class='sts2-panel__label'>楼层</div><div class='sts2-panel__value'>{html.escape(str(floor_num))}</div>"
-        f"<div class='sts2-panel__label'>生命</div><div class='sts2-panel__value'>{html.escape(str(hp))}/{html.escape(str(max_hp))}</div>"
-        f"<div class='sts2-panel__label'>金币</div><div class='sts2-panel__value'>{html.escape(str(gold))}</div>"
+        f"<div class='sts2-state-lines'>{chips_html}</div>"
+        f"{details_html}"
+        f"<div class='sts2-panel__footnote'>来源：http://{game_host}:{game_port}</div>"
         "</div>"
-        + "".join(f"<div class='sts2-panel__detail'>{html.escape(item)}</div>" for item in details[:4])
-        + f"<div class='sts2-panel__footnote'>来源：http://{game_host}:{game_port}</div>"
-        + "</div>"
     )
 
 
@@ -226,6 +218,29 @@ class STS2WebUI(WebUI):
         if isinstance(obj, dict):
             return obj.get(key, default)
         return getattr(obj, key, default)
+
+    def expand_debug_sections(self, content: Any) -> Any:
+        if not isinstance(content, str):
+            return content
+        return content.replace("<details>", "<details open>")
+
+    def configure_run_limits(self, max_actions_per_round: int) -> None:
+        fncall_agent_module.MAX_LLM_CALL_PER_RUN = max(6, max_actions_per_round * 3)
+
+    def build_auto_prompt(self, max_actions_per_round: int, state_mode: str) -> str:
+        prompt_lines = [
+            "继续自动游玩这一局。",
+            f"本轮最多允许你连续执行 {max_actions_per_round} 个真实游戏动作。",
+        ]
+        state = self.fetch_runtime_state()
+        if state_mode == "json_summary" and state:
+            prompt_lines.append("下面是基于本地 JSON 状态整理的摘要，可直接据此决策；必要时也可以再调用工具核对状态。")
+            prompt_lines.append(build_state_summary_for_prompt(state))
+        else:
+            prompt_lines.append("请优先调用 `sts2-get_game_state` 读取最新状态，再开始行动。")
+        prompt_lines.append("尽量把当前这一屏或当前回合推进得更完整一些，不要只做一个最小动作就停下。")
+        prompt_lines.append("最后用中文简短说明你做了什么。")
+        return "\n".join(prompt_lines)
 
     def render_state_panel(self) -> str:
         return render_state_panel_html(self.game_host, self.game_port)
@@ -357,21 +372,7 @@ class STS2WebUI(WebUI):
             battle = state.get("battle", {}) if isinstance(state.get("battle"), dict) else {}
             energy = battle.get("player", {}).get("energy") if isinstance(battle.get("player"), dict) else "-"
             enemies = battle.get("enemies", []) if isinstance(battle.get("enemies"), list) else []
-            return f"战斗中，生命 {hp}/{max_hp}，能量 {energy}，敌人 {len(enemies)}，金币 {gold}"
-        if state_type == "map":
-            return f"地图选择，生命 {hp}/{max_hp}，金币 {gold}"
-        if state_type == "event":
-            event_state = state.get("event", {}) if isinstance(state.get("event"), dict) else {}
-            return f"事件 {event_state.get('event_name') or '-'}，生命 {hp}/{max_hp}"
-        if state_type == "card_select":
-            section = state.get("card_select", {}) if isinstance(state.get("card_select"), dict) else {}
-            return f"选牌界面（{section.get('screen_type') or '-'}），可选 {len(section.get('cards', []))} 张"
-        if state_type == "shop":
-            return f"商店，金币 {gold}"
-        if state_type == "rest_site":
-            return f"篝火，生命 {hp}/{max_hp}"
-        if state_type == "menu":
-            return "主菜单"
+            return f"{state_type}，生命 {hp}/{max_hp}，能量 {energy}，敌人 {len(enemies)}，金币 {gold}"
         return f"{state_type}，生命 {hp}/{max_hp}，金币 {gold}"
 
     def record_recent_step(
@@ -399,11 +400,11 @@ class STS2WebUI(WebUI):
                 if name:
                     actions.append(self.tool_action_cn(str(name), None))
 
-        unique_actions = list(dict.fromkeys(action for action in actions if action))
+        unique_actions = [item for item in dict.fromkeys(actions) if item]
         if unique_actions and unique_actions[0] == "读取当前状态" and len(unique_actions) > 1:
-            action_text = f"读取状态后，{unique_actions[1]}"
+            action_text = f"读取状态后，{'；'.join(unique_actions[1:3])}"
         elif unique_actions:
-            action_text = "；".join(unique_actions[:2])
+            action_text = "；".join(unique_actions[:3])
         else:
             fallback_text = fallback_text.replace("\n", " ").strip()
             action_text = fallback_text[:80] if fallback_text else "未执行明确动作"
@@ -411,10 +412,7 @@ class STS2WebUI(WebUI):
         post_text = self.short_state_cn(post_state)
         pre_text = self.short_state_cn(pre_state)
         summary = f"{action_text}。"
-        if pre_text == post_text:
-            summary += "状态基本未变化。"
-        else:
-            summary += f"当前{post_text}。"
+        summary += "状态基本未变化。" if pre_text == post_text else f"当前{post_text}。"
         self.recent_steps.append({"title": title, "summary": summary[:220]})
         self.recent_steps = self.recent_steps[-50:]
 
@@ -423,10 +421,13 @@ class STS2WebUI(WebUI):
         chatbot: list[Any] | None,
         history: list[dict[str, Any]],
         title: str,
+        max_actions_per_round: int,
+        state_mode: str,
     ) -> tuple[list[Any], list[dict[str, Any]]]:
         chatbot = list(chatbot or [])
         history = list(history or [])
-        history.append({ROLE: USER, CONTENT: [{"text": AUTO_STEP_PROMPT}], NAME: self.user_config[NAME]})
+        prompt = self.build_auto_prompt(max_actions_per_round=max_actions_per_round, state_mode=state_mode)
+        history.append({ROLE: USER, CONTENT: [{"text": prompt}], NAME: self.user_config[NAME]})
         chatbot.append([f"[{title}]", None])
         return chatbot, history
 
@@ -450,9 +451,11 @@ class STS2WebUI(WebUI):
         chatbot: list[Any] | None,
         history: list[dict[str, Any]],
         agent_selector: int = 0,
+        max_actions_per_round: int = 3,
     ) -> tuple[list[Any], list[dict[str, Any]], list[Any]]:
         chatbot = list(chatbot or [])
         history = list(history or [])
+        self.configure_run_limits(max_actions_per_round)
         agent_count = len(self.agent_list)
         if not chatbot:
             chatbot = [[None, [None for _ in range(agent_count)]]]
@@ -465,7 +468,6 @@ class STS2WebUI(WebUI):
         num_input_bubbles = len(chatbot) - 1
         num_output_bubbles = 1
         responses: list[Any] = []
-
         agent_runner = self.agent_list[agent_selector]
         if self.agent_hub:
             agent_runner = self.agent_hub
@@ -481,6 +483,9 @@ class STS2WebUI(WebUI):
         final_messages = [res for res in responses if self._message_get(res, CONTENT) != PENDING_USER_INPUT]
         if final_messages:
             display_responses = convert_fncall_to_text(final_messages)
+            for rsp in display_responses:
+                if isinstance(rsp, dict) and CONTENT in rsp:
+                    rsp[CONTENT] = self.expand_debug_sections(rsp[CONTENT])
             while len(display_responses) > num_output_bubbles:
                 chatbot.append([None, [None for _ in range(agent_count)]])
                 num_output_bubbles += 1
@@ -492,9 +497,6 @@ class STS2WebUI(WebUI):
                 chatbot[num_input_bubbles + index][1][agent_index] = rsp[CONTENT]
             history.extend(final_messages)
 
-        if self.verbose:
-            logger.info("agent_run response:\n" + pprint.pformat(final_messages, indent=2))
-
         return chatbot, history, final_messages
 
     def _complete_turn(
@@ -503,22 +505,38 @@ class STS2WebUI(WebUI):
         history: list[dict[str, Any]],
         title: str,
         agent_selector: int = 0,
+        max_actions_per_round: int = 3,
     ) -> tuple[list[Any], list[dict[str, Any]], dict[str, Any] | None, dict[str, Any] | None]:
         pre_state = self.fetch_runtime_state()
-        chatbot, history, turn_messages = self._run_agent_once(chatbot, history, agent_selector)
+        chatbot, history, turn_messages = self._run_agent_once(
+            chatbot,
+            history,
+            agent_selector=agent_selector,
+            max_actions_per_round=max_actions_per_round,
+        )
         post_state = self.fetch_runtime_state()
         self.record_recent_step(title, pre_state, post_state, turn_messages)
         return chatbot, history, pre_state, post_state
 
-    def single_step(self, chatbot: list[Any] | None, history: list[dict[str, Any]], agent_selector: int = 0):
+    def single_step(
+        self,
+        chatbot: list[Any] | None,
+        history: list[dict[str, Any]],
+        max_actions_per_round: int,
+        state_mode: str,
+        agent_selector: int = 0,
+    ):
         self.auto_step_counter += 1
         title = f"自动步骤 {self.auto_step_counter}"
-        chatbot, history = self.append_auto_user_turn(chatbot, history, title)
-        chatbot, history, _, post_state = self._complete_turn(chatbot, history, title, agent_selector)
-        detail = "单步完成"
-        stop_reason = self.stop_reason(post_state)
-        if stop_reason:
-            detail = stop_reason
+        chatbot, history = self.append_auto_user_turn(chatbot, history, title, int(max_actions_per_round), state_mode)
+        chatbot, history, _, post_state = self._complete_turn(
+            chatbot,
+            history,
+            title,
+            agent_selector=agent_selector,
+            max_actions_per_round=int(max_actions_per_round),
+        )
+        detail = self.stop_reason(post_state) or "单步完成"
         yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status("空闲", detail)
 
     def start_autoplay(
@@ -527,13 +545,15 @@ class STS2WebUI(WebUI):
         history: list[dict[str, Any]],
         max_steps: int | float | None,
         max_stuck: int | float | None,
+        max_actions_per_round: int | float | None,
+        state_mode: str,
         agent_selector: int = 0,
     ):
         limit = int(max_steps or 0)
         stuck_limit = max(1, int(max_stuck or 6))
+        max_actions = max(1, int(max_actions_per_round or 3))
         unchanged_rounds = 0
         self.autoplay_enabled = True
-
         yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status("运行中", "准备开始")
 
         while self.autoplay_enabled:
@@ -543,7 +563,6 @@ class STS2WebUI(WebUI):
                 self.autoplay_enabled = False
                 yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status("已停止", reason)
                 return
-
             if limit > 0 and self.auto_step_counter >= limit:
                 self.autoplay_enabled = False
                 yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status("已停止", f"达到最大步数 {limit}")
@@ -551,31 +570,30 @@ class STS2WebUI(WebUI):
 
             self.auto_step_counter += 1
             title = f"自动步骤 {self.auto_step_counter}"
-            chatbot, history = self.append_auto_user_turn(chatbot, history, title)
+            chatbot, history = self.append_auto_user_turn(chatbot, history, title, max_actions, state_mode)
             yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status("运行中", f"{title} 进行中")
 
-            chatbot, history, pre_state, post_state = self._complete_turn(chatbot, history, title, agent_selector)
-            pre_sig = self.state_signature(pre_state)
-            post_sig = self.state_signature(post_state)
-            if pre_sig == post_sig:
-                unchanged_rounds += 1
-            else:
-                unchanged_rounds = 0
+            chatbot, history, pre_state, post_state = self._complete_turn(
+                chatbot,
+                history,
+                title,
+                agent_selector=agent_selector,
+                max_actions_per_round=max_actions,
+            )
+            unchanged_rounds = unchanged_rounds + 1 if self.state_signature(pre_state) == self.state_signature(post_state) else 0
 
             reason = self.stop_reason(post_state)
             if reason:
                 self.autoplay_enabled = False
                 yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status("已停止", reason)
                 return
-
             if unchanged_rounds >= stuck_limit:
                 self.autoplay_enabled = False
-                detail = f"连续 {unchanged_rounds} 轮状态未变化，已暂停"
-                yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status("已停止", detail)
+                yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status("已停止", f"连续 {unchanged_rounds} 轮状态未变化，已暂停")
                 return
 
             yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status("运行中", f"已执行 {self.auto_step_counter} 步")
-            time.sleep(0.2)
+            time.sleep(0.15)
 
         yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status("已暂停", f"已执行 {self.auto_step_counter} 步")
 
@@ -583,12 +601,31 @@ class STS2WebUI(WebUI):
         self.autoplay_enabled = False
         return self.render_autoplay_status("已暂停", f"已执行 {self.auto_step_counter} 步")
 
-    def change_agent_with_state(self, agent_selector: int):
-        return agent_selector, gr.HTML(self.render_agent_info_html(agent_selector))
-
-    def agent_run_with_state(self, chatbot: list[Any] | None, history: list[dict[str, Any]], agent_selector: int = 0):
+    def agent_run_with_state(
+        self,
+        chatbot: list[Any] | None,
+        history: list[dict[str, Any]],
+        max_actions_per_round: int,
+        state_mode: str,
+        agent_selector: int = 0,
+    ):
         title = self._derive_turn_title(history)
-        chatbot, history, _, _ = self._complete_turn(chatbot, history, title, agent_selector)
+        if state_mode == "json_summary":
+            state = self.fetch_runtime_state()
+            if state:
+                history = list(history or [])
+                history.append({
+                    ROLE: USER,
+                    CONTENT: [{"text": "补充给你的结构化状态摘要如下，可结合工具继续决策：\n" + build_state_summary_for_prompt(state)}],
+                    NAME: self.user_config[NAME],
+                })
+        chatbot, history, _, _ = self._complete_turn(
+            chatbot,
+            history,
+            title,
+            agent_selector=agent_selector,
+            max_actions_per_round=int(max_actions_per_round),
+        )
         yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status("空闲")
 
     def run(
@@ -601,10 +638,7 @@ class STS2WebUI(WebUI):
         **kwargs,
     ):
         self.run_kwargs = kwargs
-        custom_theme = gr.themes.Default(
-            primary_hue=gr.themes.utils.colors.blue,
-            radius_size=gr.themes.utils.sizes.radius_none,
-        )
+        custom_theme = gr.themes.Default(primary_hue=gr.themes.utils.colors.blue, radius_size=gr.themes.utils.sizes.radius_none)
 
         with gr.Blocks(css=STS2_WEBUI_CSS, theme=custom_theme) as demo:
             history = gr.State(list(messages or []))
@@ -620,15 +654,6 @@ class STS2WebUI(WebUI):
                             flushing=False,
                             show_copy_button=True,
                             elem_classes=["sts2-chatbot"],
-                            latex_delimiters=[
-                                {"left": "\\(", "right": "\\)", "display": True},
-                                {"left": "\\begin{equation}", "right": "\\end{equation}", "display": True},
-                                {"left": "\\begin{align}", "right": "\\end{align}", "display": True},
-                                {"left": "\\begin{alignat}", "right": "\\end{alignat}", "display": True},
-                                {"left": "\\begin{gather}", "right": "\\end{gather}", "display": True},
-                                {"left": "\\begin{CD}", "right": "\\end{CD}", "display": True},
-                                {"left": "\\[", "right": "\\]", "display": True},
-                            ],
                         )
                         input_box = mgr.MultimodalInput(placeholder=self.input_placeholder)
                         audio_input = gr.Audio(sources=["microphone"], type="filepath")
@@ -645,23 +670,14 @@ class STS2WebUI(WebUI):
                             refresh_btn = gr.Button("刷新", elem_classes=["sts2-small-btn"])
 
                         with gr.Row(elem_classes=["sts2-control-row"]):
-                            max_steps = gr.Number(
-                                label="最大步数（0=无限）",
-                                value=0,
-                                minimum=0,
-                                precision=0,
-                                elem_classes=["sts2-number-compact"],
-                            )
-                            max_stuck = gr.Number(
-                                label="卡住轮数",
-                                value=6,
-                                minimum=1,
-                                precision=0,
-                                elem_classes=["sts2-number-compact"],
-                            )
+                            state_mode = gr.Dropdown(label="状态模式", choices=[("Markdown 原始", "markdown"), ("JSON 摘要", "json_summary")], value="markdown")
+                            max_actions = gr.Number(label="每轮动作数", value=3, minimum=1, precision=0, elem_classes=["sts2-number-compact"])
+
+                        with gr.Row(elem_classes=["sts2-control-row"]):
+                            max_steps = gr.Number(label="最大步数（0=无限）", value=0, minimum=0, precision=0, elem_classes=["sts2-number-compact"])
+                            max_stuck = gr.Number(label="卡住轮数", value=6, minimum=1, precision=0, elem_classes=["sts2-number-compact"])
 
                         autoplay_status = gr.HTML(self.render_autoplay_status("空闲"))
-
                         if self.prompt_suggestions:
                             gr.Examples(label="建议提示词", examples=self.prompt_suggestions, inputs=[input_box])
 
@@ -673,19 +689,19 @@ class STS2WebUI(WebUI):
                 )
                 input_promise = input_promise.then(
                     self.agent_run_with_state,
-                    [chatbot, history, agent_selector],
+                    [chatbot, history, max_actions, state_mode, agent_selector],
                     [chatbot, history, state_panel, recent_steps, autoplay_status],
                 )
                 input_promise.then(self.flushed, None, [input_box])
 
                 single_step_btn.click(
                     fn=self.single_step,
-                    inputs=[chatbot, history, agent_selector],
+                    inputs=[chatbot, history, max_actions, state_mode, agent_selector],
                     outputs=[chatbot, history, state_panel, recent_steps, autoplay_status],
                 )
                 auto_run_btn.click(
                     fn=self.start_autoplay,
-                    inputs=[chatbot, history, max_steps, max_stuck, agent_selector],
+                    inputs=[chatbot, history, max_steps, max_stuck, max_actions, state_mode, agent_selector],
                     outputs=[chatbot, history, state_panel, recent_steps, autoplay_status],
                 )
                 pause_btn.click(fn=self.pause_autoplay, inputs=None, outputs=[autoplay_status], queue=False)
@@ -700,27 +716,9 @@ class STS2WebUI(WebUI):
                     queue=False,
                 )
 
-                if len(self.agent_list) > 1:
-                    selector = gr.Dropdown(
-                        [(agent.name, i) for i, agent in enumerate(self.agent_list)],
-                        label="Agent",
-                        value=0,
-                        interactive=True,
-                    )
-                    selector.change(
-                        fn=self.change_agent_with_state,
-                        inputs=[selector],
-                        outputs=[agent_selector, agent_info_block],
-                        queue=False,
-                    )
-
             demo.load(None)
 
-        demo.queue(default_concurrency_limit=concurrency_limit).launch(
-            share=share,
-            server_name=server_name,
-            server_port=server_port,
-        )
+        demo.queue(default_concurrency_limit=concurrency_limit).launch(share=share, server_name=server_name, server_port=server_port)
 
 
 def build_llm_cfg(args: argparse.Namespace) -> dict[str, Any]:
@@ -745,13 +743,7 @@ def build_mcp_tools(args: argparse.Namespace) -> list[dict[str, Any]]:
         "mcpServers": {
             "sts2": {
                 "command": args.mcp_python,
-                "args": [
-                    str(server_script),
-                    "--host",
-                    args.game_host,
-                    "--port",
-                    str(args.game_port),
-                ],
+                "args": [str(server_script), "--host", args.game_host, "--port", str(args.game_port)],
                 "cwd": str(server_dir),
             }
         }
@@ -798,20 +790,10 @@ def main() -> int:
         ],
     }
 
-    ui = STS2WebUI(
-        bot,
-        chatbot_config=chatbot_config,
-        game_host=args.game_host,
-        game_port=args.game_port,
-    )
-
+    ui = STS2WebUI(bot, chatbot_config=chatbot_config, game_host=args.game_host, game_port=args.game_port)
     print(f"Game API: http://{args.game_host}:{args.game_port}")
     print(f"Qwen-Agent UI: http://{args.host}:{args.port}")
-    ui.run(
-        server_name=args.host,
-        server_port=args.port,
-        share=args.share,
-    )
+    ui.run(server_name=args.host, server_port=args.port, share=args.share)
     return 0
 
 
