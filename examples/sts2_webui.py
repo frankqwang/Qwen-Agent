@@ -25,7 +25,7 @@ from qwen_agent.gui import WebUI
 from qwen_agent.gui.gradio_dep import gr, mgr, ms
 from qwen_agent.gui.gradio_utils import covert_image_to_base64
 from qwen_agent.gui.utils import convert_fncall_to_text, convert_history_to_chatbot, get_avatar_image
-from qwen_agent.llm.schema import AUDIO, CONTENT, FILE, IMAGE, NAME, ROLE, USER, VIDEO
+from qwen_agent.llm.schema import ASSISTANT, AUDIO, CONTENT, FILE, IMAGE, NAME, ROLE, USER, VIDEO
 from qwen_agent.log import logger
 
 
@@ -88,6 +88,17 @@ def fetch_state(game_host: str, game_port: int) -> dict[str, Any]:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def post_game_action(game_host: str, game_port: int, body: dict[str, Any]) -> dict[str, Any]:
+    req = urllib.request.Request(
+        f"http://{game_host}:{game_port}/api/v1/singleplayer",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
 def get_player(state: dict[str, Any]) -> dict[str, Any]:
     if isinstance(state.get("player"), dict):
         return state["player"]
@@ -144,6 +155,15 @@ def build_state_summary_for_prompt(state: dict[str, Any]) -> str:
                     f"{enemy.get('entity_id') or enemy.get('name')}: {enemy.get('hp', '?')}/{enemy.get('max_hp', '?')}"
                     for enemy in enemies[:6]
                     if isinstance(enemy, dict)
+                )
+            )
+        hand = battle.get("hand", []) if isinstance(battle.get("hand"), list) else []
+        if hand:
+            lines.append(
+                "手牌：" + "；".join(
+                    f"{idx}:{card.get('name', '?')}(费用 {card.get('cost', '?')})"
+                    for idx, card in enumerate(hand[:10])
+                    if isinstance(card, dict)
                 )
             )
     return "\n".join(lines)
@@ -209,6 +229,7 @@ class STS2WebUI(WebUI):
         self.current_run_started_at: float | None = None
         self.last_terminal_signature: str | None = None
         self.last_terminal_event = ""
+        self.last_forced_end_turn_signature: str | None = None
         self.run_events_path = REPO_ROOT / "logs" / "sts2_run_events.jsonl"
         self.run_events_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -237,6 +258,42 @@ class STS2WebUI(WebUI):
             if self.current_run_started_at is None:
                 self.current_run_started_at = time.time()
             self.last_terminal_signature = None
+
+    def _battle_info(self, state: dict[str, Any] | None) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+        battle = state.get("battle", {}) if isinstance(state, dict) and isinstance(state.get("battle"), dict) else {}
+        battle_player = battle.get("player", {}) if isinstance(battle.get("player"), dict) else {}
+        hand = battle.get("hand", []) if isinstance(battle.get("hand"), list) else []
+        return battle, battle_player, [card for card in hand if isinstance(card, dict)]
+
+    def should_force_end_turn(self, state: dict[str, Any] | None) -> bool:
+        if not state or state.get("state_type") not in {"monster", "elite", "boss"}:
+            return False
+        signature = self.state_signature(state)
+        if signature == self.last_forced_end_turn_signature:
+            return False
+        _, battle_player, hand = self._battle_info(state)
+        energy = battle_player.get("energy")
+        if energy not in (0, "0"):
+            return False
+        return not any(card.get("cost") in (0, "0") for card in hand)
+
+    def force_end_turn(self, title: str, chatbot: list[Any] | None, history: list[dict[str, Any]]):
+        chatbot = list(chatbot or [])
+        history = list(history or [])
+        pre_state = self.fetch_runtime_state()
+        pre_signature = self.state_signature(pre_state)
+        self.last_forced_end_turn_signature = pre_signature
+        post_game_action(self.game_host, self.game_port, {"action": "end_turn"})
+        time.sleep(0.2)
+        post_state = self.fetch_runtime_state() or pre_state or {}
+        history.extend([
+            {ROLE: ASSISTANT, CONTENT: "检测到当前能量为 0，直接结束回合。", NAME: self.agent_config_list[0]["name"]},
+            {ROLE: "function", NAME: "sts2-combat_end_turn", CONTENT: json.dumps(post_state, ensure_ascii=False)},
+        ])
+        chatbot.append([None, [None for _ in range(len(self.agent_list))]])
+        chatbot[-1][1][0] = "检测到当前能量为 0，直接调用 `sts2-combat_end_turn` 结束当前回合。"
+        self.record_recent_step(title, pre_state, post_state, history[-2:])
+        return chatbot, history, post_state
 
     def terminal_event_signature(self, state: dict[str, Any] | None, reason: str) -> str:
         return f"{reason}|{self.state_signature(state)}"
@@ -277,6 +334,7 @@ class STS2WebUI(WebUI):
         prompt_lines = [
             "继续自动游玩这一局。",
             f"本轮最多允许你连续执行 {max_actions_per_round} 个真实游戏动作。",
+            "每执行一个动作后，都要根据最新状态重新判断，不要假设手牌索引、能量、敌人血量或可用选项保持不变。",
         ]
         state = self.fetch_runtime_state()
         if state_mode == "json_summary" and state:
@@ -284,6 +342,8 @@ class STS2WebUI(WebUI):
             prompt_lines.append(build_state_summary_for_prompt(state))
         else:
             prompt_lines.append("请优先调用 `sts2-get_game_state` 读取最新状态，再开始行动。")
+        prompt_lines.append("战斗中如果最新状态显示能量为 0，并且没有明确看到可打出的 0 费牌或免费动作，就优先调用 `sts2-combat_end_turn`。")
+        prompt_lines.append("如果你不确定当前还能不能出牌，先调用 `sts2-get_game_state`，不要盲目继续 `sts2-combat_play_card`。")
         prompt_lines.append("尽量把当前这一屏或当前回合推进得更完整一些，不要只做一个最小动作就停下。")
         prompt_lines.append("最后用中文简短说明你做了什么。")
         return "\n".join(prompt_lines)
@@ -497,14 +557,35 @@ class STS2WebUI(WebUI):
             return compact or "手动步骤"
         return "手动步骤"
 
-    def _run_agent_once(
+    def _sync_chatbot_messages(
+        self,
+        chatbot: list[Any],
+        display_responses: list[Any],
+        agent_count: int,
+        num_input_bubbles: int,
+        num_output_bubbles: int,
+    ) -> tuple[list[Any], int]:
+        while len(display_responses) > num_output_bubbles:
+            chatbot.append([None, [None for _ in range(agent_count)]])
+            num_output_bubbles += 1
+        for index in range(num_output_bubbles):
+            if chatbot[num_input_bubbles + index][1] is None:
+                chatbot[num_input_bubbles + index][1] = [None for _ in range(agent_count)]
+        for index, rsp in enumerate(display_responses):
+            agent_index = 0
+            if isinstance(rsp, dict):
+                agent_index = self._get_agent_index_by_name(rsp.get(NAME))
+                chatbot[num_input_bubbles + index][1][agent_index] = rsp.get(CONTENT)
+        return chatbot, num_output_bubbles
+
+    def _run_agent_once_stream(
         self,
         chatbot: list[Any] | None,
         history: list[dict[str, Any]],
         agent_selector: int = 0,
         max_actions_per_round: int = 3,
         expand_debug: bool = True,
-    ) -> tuple[list[Any], list[dict[str, Any]], list[Any]]:
+    ):
         chatbot = list(chatbot or [])
         history = list(history or [])
         self.configure_run_limits(max_actions_per_round)
@@ -520,6 +601,7 @@ class STS2WebUI(WebUI):
         num_input_bubbles = len(chatbot) - 1
         num_output_bubbles = 1
         responses: list[Any] = []
+        final_messages: list[Any] = []
         agent_runner = self.agent_list[agent_selector]
         if self.agent_hub:
             agent_runner = self.agent_hub
@@ -531,29 +613,31 @@ class STS2WebUI(WebUI):
             if last_content == PENDING_USER_INPUT:
                 break
 
-        final_messages = [res for res in responses if self._message_get(res, CONTENT) != PENDING_USER_INPUT]
-        if final_messages:
+            final_messages = [res for res in responses if self._message_get(res, CONTENT) != PENDING_USER_INPUT]
+            if not final_messages:
+                continue
+
             display_responses = convert_fncall_to_text(final_messages)
             if expand_debug:
                 for rsp in display_responses:
                     if isinstance(rsp, dict) and CONTENT in rsp:
                         rsp[CONTENT] = self.expand_debug_sections(rsp[CONTENT])
-            while len(display_responses) > num_output_bubbles:
-                chatbot.append([None, [None for _ in range(agent_count)]])
-                num_output_bubbles += 1
-            for index in range(num_output_bubbles):
-                if chatbot[num_input_bubbles + index][1] is None:
-                    chatbot[num_input_bubbles + index][1] = [None for _ in range(agent_count)]
-            for index, rsp in enumerate(display_responses):
-                agent_index = 0
-                if isinstance(rsp, dict):
-                    agent_index = self._get_agent_index_by_name(rsp.get(NAME))
-                    chatbot[num_input_bubbles + index][1][agent_index] = rsp.get(CONTENT)
+
+            chatbot, num_output_bubbles = self._sync_chatbot_messages(
+                chatbot,
+                display_responses,
+                agent_count,
+                num_input_bubbles,
+                num_output_bubbles,
+            )
+            yield chatbot, history, final_messages, False
+
+        if final_messages:
             history.extend(final_messages)
 
-        return chatbot, history, final_messages
+        yield chatbot, history, final_messages, True
 
-    def _complete_turn(
+    def _complete_turn_stream(
         self,
         chatbot: list[Any] | None,
         history: list[dict[str, Any]],
@@ -561,18 +645,21 @@ class STS2WebUI(WebUI):
         agent_selector: int = 0,
         max_actions_per_round: int = 3,
         expand_debug: bool = True,
-    ) -> tuple[list[Any], list[dict[str, Any]], dict[str, Any] | None, dict[str, Any] | None]:
+    ):
         pre_state = self.fetch_runtime_state()
-        chatbot, history, turn_messages = self._run_agent_once(
+        turn_messages: list[Any] = []
+        for chatbot, history, turn_messages, is_final in self._run_agent_once_stream(
             chatbot,
             history,
             agent_selector=agent_selector,
             max_actions_per_round=max_actions_per_round,
             expand_debug=expand_debug,
-        )
+        ):
+            if not is_final:
+                yield chatbot, history, pre_state, None, turn_messages, False
         post_state = self.fetch_runtime_state()
         self.record_recent_step(title, pre_state, post_state, turn_messages)
-        return chatbot, history, pre_state, post_state
+        yield chatbot, history, pre_state, post_state, turn_messages, True
 
     def single_step(
         self,
@@ -586,14 +673,31 @@ class STS2WebUI(WebUI):
         self.auto_step_counter += 1
         title = f"自动步骤 {self.auto_step_counter}"
         chatbot, history = self.append_auto_user_turn(chatbot, history, title, int(max_actions_per_round), state_mode)
-        chatbot, history, _, post_state = self._complete_turn(
+        current_state = self.fetch_runtime_state()
+        if self.should_force_end_turn(current_state):
+            chatbot, history, post_state = self.force_end_turn(title, chatbot, history)
+            if self.state_signature(current_state) == self.state_signature(post_state):
+                detail = "尝试结束回合后状态未变化，请等待动画或手动刷新。"
+                yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status("空闲", detail)
+                return
+            terminal_reason = self.stop_reason(post_state)
+            self.maybe_record_terminal_event(post_state, terminal_reason)
+            detail = terminal_reason or "单步完成"
+            yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status("空闲", detail)
+            return
+        post_state = None
+        for chatbot, history, _, post_state, _, is_final in self._complete_turn_stream(
             chatbot,
             history,
             title,
             agent_selector=agent_selector,
             max_actions_per_round=int(max_actions_per_round),
             expand_debug=expand_debug,
-        )
+        ):
+            yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status(
+                "空闲" if is_final else "运行中",
+                None if is_final else f"{title} 进行中",
+            )
         terminal_reason = self.stop_reason(post_state)
         self.maybe_record_terminal_event(post_state, terminal_reason)
         detail = terminal_reason or "单步完成"
@@ -634,15 +738,41 @@ class STS2WebUI(WebUI):
             title = f"自动步骤 {self.auto_step_counter}"
             chatbot, history = self.append_auto_user_turn(chatbot, history, title, max_actions, state_mode)
             yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status("运行中", f"{title} 进行中")
+            current_state = self.fetch_runtime_state()
+            if self.should_force_end_turn(current_state):
+                chatbot, history, post_state = self.force_end_turn(title, chatbot, history)
+                if self.state_signature(current_state) == self.state_signature(post_state):
+                    self.autoplay_enabled = False
+                    yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status(
+                        "已暂停",
+                        "尝试结束回合后状态未变化，请等待动画或手动刷新。",
+                    )
+                    return
+                reason = self.stop_reason(post_state)
+                if reason:
+                    self.maybe_record_terminal_event(post_state, reason)
+                    self.autoplay_enabled = False
+                    yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status("已停止", reason)
+                    return
+                yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status("运行中", f"已执行 {self.auto_step_counter} 步")
+                time.sleep(0.15)
+                continue
 
-            chatbot, history, pre_state, post_state = self._complete_turn(
+            pre_state = None
+            post_state = None
+            for chatbot, history, pre_state, post_state, _, is_final in self._complete_turn_stream(
                 chatbot,
                 history,
                 title,
                 agent_selector=agent_selector,
                 max_actions_per_round=max_actions,
                 expand_debug=expand_debug,
-            )
+            ):
+                if not is_final:
+                    yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status(
+                        "运行中",
+                        f"{title} 进行中",
+                    )
             unchanged_rounds = unchanged_rounds + 1 if self.state_signature(pre_state) == self.state_signature(post_state) else 0
             reason = self.stop_reason(post_state)
             if reason:
@@ -683,17 +813,20 @@ class STS2WebUI(WebUI):
                     CONTENT: [{"text": "补充给你的结构化状态摘要如下，可结合工具继续决策：\n" + build_state_summary_for_prompt(state)}],
                     NAME: self.user_config[NAME],
                 })
-        chatbot, history, _, _ = self._complete_turn(
+        for chatbot, history, _, _, _, is_final in self._complete_turn_stream(
             chatbot,
             history,
             title,
             agent_selector=agent_selector,
             max_actions_per_round=int(max_actions_per_round),
             expand_debug=expand_debug,
-        )
-        latest_state = self.fetch_runtime_state()
-        self.maybe_record_terminal_event(latest_state, self.stop_reason(latest_state))
-        yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status("空闲")
+        ):
+            latest_state = self.fetch_runtime_state()
+            if is_final:
+                self.maybe_record_terminal_event(latest_state, self.stop_reason(latest_state))
+            yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status(
+                "空闲" if is_final else "运行中"
+            )
 
     def run(
         self,
@@ -830,12 +963,13 @@ def build_agent(args: argparse.Namespace) -> Assistant:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Launch the native Qwen-Agent WebUI for Slay the Spire 2.")
-    parser.add_argument("--model", default="qwen/qwen3.5-9b")
+    parser.add_argument("--model", default="qwen/qwen3.5-4b")
+    # parser.add_argument("--model", default="qwen/qwen3.5-0.8b")
     parser.add_argument("--api-base", default="http://127.0.0.1:1234/v1")
     parser.add_argument("--api-key", default="lm-studio")
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", type=float, default=0.8)
-    parser.add_argument("--max-input-tokens", type=int, default=16000)
+    parser.add_argument("--max-input-tokens", type=int, default=2048)
     parser.add_argument("--fncall-prompt-type", default="nous")
     parser.add_argument("--system-message", default=DEFAULT_SYSTEM_MESSAGE)
     parser.add_argument("--host", default="127.0.0.1")
@@ -853,8 +987,8 @@ def main() -> int:
         "input.placeholder": "让 agent 查看 STS2 状态，或者直接执行下一步。",
         "prompt.suggestions": [
             "先读取当前游戏状态，然后给出下一步最合适的动作。",
-            "请继续当前这局游戏，先读状态再行动。",
             "如果当前是战斗，优先考虑最稳的出牌顺序。",
+            "少解释，优先行动，只给简短理由",
         ],
     }
 
