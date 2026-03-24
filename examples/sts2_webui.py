@@ -41,7 +41,7 @@ html,body{margin:0!important;padding:0!important;background:#111318!important}
 body .gradio-container{max-width:none!important;width:calc(100vw - 2px)!important;margin:0!important;padding:1px!important}
 body .gradio-container .main{max-width:none!important;width:100%!important;margin:0!important;padding:0!important}
 .app,.wrap,.contain{max-width:none!important;width:100%!important;margin:0!important;padding:0!important}
-.container{display:grid!important;grid-template-columns:minmax(0,1fr) minmax(0,1fr)!important;gap:10px!important;width:100%!important;max-width:none!important;margin:0!important;padding:0!important}
+.container{display:grid!important;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr)!important;gap:10px!important;width:100%!important;max-width:none!important;margin:0!important;padding:0!important}
 .sts2-main-col,.sts2-side-col{min-width:0!important;width:100%!important;max-width:none!important}
 .sts2-chatbot,.sts2-chatbot>div{width:100%!important;min-width:0!important}
 .sts2-chatbot .message-wrap,.sts2-chatbot .message-row,.sts2-chatbot .bubble-wrap{max-width:100%!important;width:100%!important}
@@ -73,7 +73,7 @@ body .gradio-container .main{max-width:none!important;width:100%!important;margi
 .markdown-body details{white-space:normal!important;overflow-wrap:anywhere;word-break:break-word}
 .markdown-body summary{white-space:normal!important}
 .markdown-body .message{overflow-wrap:anywhere;word-break:break-word}
-@media (max-width: 1100px){.container{grid-template-columns:minmax(0,1fr) minmax(0,1fr)!important;gap:8px!important}}
+@media (max-width: 1100px){.container{grid-template-columns:minmax(0,1.5fr) minmax(0,1fr)!important;gap:8px!important}}
 """
 
 
