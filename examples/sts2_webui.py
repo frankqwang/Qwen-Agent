@@ -10,6 +10,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -205,6 +206,11 @@ class STS2WebUI(WebUI):
         self.autoplay_enabled = False
         self.auto_step_counter = 0
         self.recent_steps: list[dict[str, str]] = []
+        self.current_run_started_at: float | None = None
+        self.last_terminal_signature: str | None = None
+        self.last_terminal_event = ""
+        self.run_events_path = REPO_ROOT / "logs" / "sts2_run_events.jsonl"
+        self.run_events_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _message_get(self, obj: Any, key: str, default: Any = None) -> Any:
         if isinstance(obj, dict):
@@ -221,6 +227,51 @@ class STS2WebUI(WebUI):
 
     def configure_run_limits(self, max_actions_per_round: int) -> None:
         fncall_agent_module.MAX_LLM_CALL_PER_RUN = max(6, max_actions_per_round * 3)
+
+    def observe_run_state(self, state: dict[str, Any] | None) -> None:
+        if not state:
+            return
+        state_type = state.get("state_type")
+        run_status = str(state.get("run_status") or "").lower()
+        if state_type != "menu" and run_status not in {"victory", "defeat"}:
+            if self.current_run_started_at is None:
+                self.current_run_started_at = time.time()
+            self.last_terminal_signature = None
+
+    def terminal_event_signature(self, state: dict[str, Any] | None, reason: str) -> str:
+        return f"{reason}|{self.state_signature(state)}"
+
+    def maybe_record_terminal_event(self, state: dict[str, Any] | None, reason: str | None) -> None:
+        if not state or not reason:
+            return
+        signature = self.terminal_event_signature(state, reason)
+        if signature == self.last_terminal_signature:
+            return
+
+        now = datetime.now().astimezone()
+        elapsed_seconds = None
+        if self.current_run_started_at is not None:
+            elapsed_seconds = max(0, int(time.time() - self.current_run_started_at))
+
+        payload = {
+            "timestamp": now.isoformat(timespec="seconds"),
+            "result": reason,
+            "state_type": state.get("state_type"),
+            "run_status": state.get("run_status"),
+            "floor": state.get("floor") or state.get("floor_num") or state.get("act_floor"),
+            "summary": self.short_state_cn(state),
+            "elapsed_seconds": elapsed_seconds,
+        }
+        with self.run_events_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+        elapsed_text = ""
+        if elapsed_seconds is not None:
+            minutes, seconds = divmod(elapsed_seconds, 60)
+            elapsed_text = f" | 本次运行 {minutes:02d}:{seconds:02d}"
+        self.last_terminal_event = f"最近结算：{reason} | {now.strftime('%Y-%m-%d %H:%M:%S')}{elapsed_text}"
+        self.last_terminal_signature = signature
+        self.current_run_started_at = None
 
     def build_auto_prompt(self, max_actions_per_round: int, state_mode: str) -> str:
         prompt_lines = [
@@ -244,7 +295,10 @@ class STS2WebUI(WebUI):
         text = f"自动运行：{status}"
         if detail:
             text += f" | {detail}"
-        return f"<div class='sts2-autoplay-inline'><strong>{html.escape(text)}</strong></div>"
+        extra = ""
+        if self.last_terminal_event:
+            extra = f"<div style='margin-top:4px'>{html.escape(self.last_terminal_event)}</div>"
+        return f"<div class='sts2-autoplay-inline'><strong>{html.escape(text)}</strong>{extra}</div>"
 
     def render_recent_steps_html(self) -> str:
         if not self.recent_steps:
@@ -276,7 +330,9 @@ class STS2WebUI(WebUI):
 
     def fetch_runtime_state(self) -> dict[str, Any] | None:
         try:
-            return fetch_state(self.game_host, self.game_port)
+            state = fetch_state(self.game_host, self.game_port)
+            self.observe_run_state(state)
+            return state
         except Exception:
             return None
 
@@ -538,7 +594,9 @@ class STS2WebUI(WebUI):
             max_actions_per_round=int(max_actions_per_round),
             expand_debug=expand_debug,
         )
-        detail = self.stop_reason(post_state) or "单步完成"
+        terminal_reason = self.stop_reason(post_state)
+        self.maybe_record_terminal_event(post_state, terminal_reason)
+        detail = terminal_reason or "单步完成"
         yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status("空闲", detail)
 
     def start_autoplay(
@@ -563,6 +621,7 @@ class STS2WebUI(WebUI):
             current_state = self.fetch_runtime_state()
             reason = self.stop_reason(current_state)
             if reason:
+                self.maybe_record_terminal_event(current_state, reason)
                 self.autoplay_enabled = False
                 yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status("已停止", reason)
                 return
@@ -587,6 +646,7 @@ class STS2WebUI(WebUI):
             unchanged_rounds = unchanged_rounds + 1 if self.state_signature(pre_state) == self.state_signature(post_state) else 0
             reason = self.stop_reason(post_state)
             if reason:
+                self.maybe_record_terminal_event(post_state, reason)
                 self.autoplay_enabled = False
                 yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status("已停止", reason)
                 return
@@ -631,6 +691,8 @@ class STS2WebUI(WebUI):
             max_actions_per_round=int(max_actions_per_round),
             expand_debug=expand_debug,
         )
+        latest_state = self.fetch_runtime_state()
+        self.maybe_record_terminal_event(latest_state, self.stop_reason(latest_state))
         yield chatbot, history, self.render_state_panel(), self.render_recent_steps_html(), self.render_autoplay_status("空闲")
 
     def run(
